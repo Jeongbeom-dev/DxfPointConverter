@@ -139,7 +139,12 @@ def _arc_points(cx, cy, r, start_deg, end_deg, seg_len, ccw=True):
 
 
 def _bulge_points(p1, p2, bulge, seg_len):
-    """LWPOLYLINE bulge(볼록도)를 원호 포인트로 변환한다."""
+    """LWPOLYLINE/POLYLINE bulge(볼록도)를 원호 포인트로 변환한다 (p1 제외, p2 포함).
+
+    포함각 theta(=4·atan(bulge), CCW 양수)로 시작점에서 직접 스윕한다.
+    끝점을 atan2 로 재계산해 스윕 방향을 추정하지 않으므로, 180°를 넘는
+    장호(major arc)와 시계/반시계 방향이 모두 정확히 처리된다.
+    """
     if abs(bulge) < 1e-12:
         return [p2]
     x1, y1 = p1
@@ -147,18 +152,23 @@ def _bulge_points(p1, p2, bulge, seg_len):
     chord = math.hypot(x2 - x1, y2 - y1)
     if chord < 1e-12:
         return [p2]
-    theta = 4 * math.atan(bulge)
-    r = chord / (2 * math.sin(theta / 2))
-    mx, my = (x1 + x2) / 2, (y1 + y2) / 2
-    dx, dy = (x2 - x1) / chord, (y2 - y1) / chord
-    h = r * math.cos(theta / 2)
-    sign = 1 if bulge > 0 else -1
-    cx = mx - dy * h * sign
-    cy = my + dx * h * sign
-    sa = math.degrees(math.atan2(y1 - cy, x1 - cx))
-    ea = math.degrees(math.atan2(y2 - cy, x2 - cx))
-    pts = _arc_points(cx, cy, abs(r), sa, ea, seg_len, ccw=(bulge > 0))
-    return pts[1:]
+    theta = 4 * math.atan(bulge)             # 부호 포함 포함각
+    half = chord / 2.0
+    r = abs(half / math.sin(theta / 2.0))    # 반지름(양수)
+    t = half / math.tan(theta / 2.0)         # 현 중점 -> 중심 (부호 있는 apothem)
+    ux, uy = (x2 - x1) / chord, (y2 - y1) / chord
+    nx, ny = -uy, ux                         # 좌수직 법선
+    cx = (x1 + x2) / 2.0 + nx * t
+    cy = (y1 + y2) / 2.0 + ny * t
+    sa = math.atan2(y1 - cy, x1 - cx)        # 시작 각(라디안)
+    arc_len = abs(theta) * r
+    n = max(2, int(math.ceil(arc_len / max(seg_len, 1e-6))))
+    n = max(n, int(math.ceil(abs(theta) / math.radians(10))))  # 최소 10도 간격
+    n = min(n, _MAX_ARC_POINTS)
+    pts = [(cx + r * math.cos(sa + theta * (i / n)),
+            cy + r * math.sin(sa + theta * (i / n))) for i in range(1, n + 1)]
+    pts[-1] = (x2, y2)                        # 끝점 부동소수 오차 스냅
+    return pts
 
 
 def _polyline_points(verts, closed, seg_len):
@@ -422,12 +432,13 @@ def stitch_paths(paths, tol=1e-3):
     return result
 
 
-ANCHORS = ("none", "center", "bl", "tl", "br", "tr")
+ANCHORS = ("none", "center", "bl", "tl", "br", "tr", "l", "r", "t", "b")
 
 
 def anchor_point(paths, mode):
     """오브젝트 경계 기준 기준점(월드 좌표) 반환.
-    mode: none(=DXF 원점 유지) / center / bl(좌하) / tl(좌상) / br(우하) / tr(우상).
+    mode: none(=DXF 원점 유지) / center(중앙) / 모서리 bl,tl,br,tr /
+          변 중앙 l(좌),r(우),t(위),b(아래).
     """
     if mode == "none":
         return (0.0, 0.0)
@@ -435,12 +446,13 @@ def anchor_point(paths, mode):
     if not b:
         return (0.0, 0.0)
     minx, miny, maxx, maxy = b
+    cx, cy = (minx + maxx) / 2.0, (miny + maxy) / 2.0
     return {
-        "center": ((minx + maxx) / 2.0, (miny + maxy) / 2.0),
-        "bl": (minx, miny),
-        "tl": (minx, maxy),
-        "br": (maxx, miny),
-        "tr": (maxx, maxy),
+        "center": (cx, cy),
+        "bl": (minx, miny), "tl": (minx, maxy),
+        "br": (maxx, miny), "tr": (maxx, maxy),
+        "l": (minx, cy), "r": (maxx, cy),
+        "t": (cx, maxy), "b": (cx, miny),
     }.get(mode, (0.0, 0.0))
 
 
@@ -618,7 +630,7 @@ def paths_to_point_text(paths, precision=3, blank_between=True):
 def paths_to_gcode_text(paths, precision=3, blank_between=True):
     """경로 리스트를 G-code 형식 텍스트로 변환한다.
 
-    각 좌표 한 줄:  G01<탭>X<x><탭>Y<y>
+    각 좌표 한 줄:  G1 X<x> Y<y>   (X, Y 앞에 공백 1칸)
     경로 사이에는 빈 줄(펜 업/이동 구분)을 넣는다. 소수점은 precision 자리.
     """
     lines = []
@@ -626,7 +638,7 @@ def paths_to_gcode_text(paths, precision=3, blank_between=True):
         if blank_between and pi > 0:
             lines.append("")  # 경로 구분 (펜 업)
         for (x, y) in pts:
-            lines.append(f"G1\tX{x:.{precision}f}\tY{y:.{precision}f}")
+            lines.append(f"G1 X{x:.{precision}f} Y{y:.{precision}f}")
     return "\n".join(lines) + "\n"
 
 

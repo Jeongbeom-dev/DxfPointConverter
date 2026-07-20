@@ -33,7 +33,7 @@ from dxf_points import (
 
 
 # 배율(scale) 허용 범위 — 0/음수/언더플로/오버플로로 인한 렌더 폭주·크래시 방지
-APP_VERSION = "1.1.0"      # 프로그램 버전 (git 태그와 일치)
+APP_VERSION = "1.2.0"      # 프로그램 버전 (git 태그와 일치)
 
 SCALE_MIN = 1e-6
 SCALE_MAX = 1e7
@@ -182,10 +182,16 @@ class DxfPointApp:
         bar3.pack(side=tk.TOP, fill=tk.X)
 
         ttk.Label(bar3, text="기준점:").pack(side=tk.LEFT)
-        for label, mode in (("원본", "none"), ("중심", "center"), ("좌하", "bl"),
-                            ("좌상", "tl"), ("우하", "br"), ("우상", "tr")):
-            ttk.Button(bar3, text=label, width=4,
-                       command=lambda m=mode: self.set_origin(m)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(bar3, text="원본", width=4,
+                   command=lambda: self.set_origin("none")).pack(side=tk.LEFT, padx=(0, 4))
+        anchor_grid = ttk.Frame(bar3)
+        anchor_grid.pack(side=tk.LEFT)
+        glyphs = [["↖", "↑", "↗"], ["←", "●", "→"], ["↙", "↓", "↘"]]
+        modes = [["tl", "t", "tr"], ["l", "center", "r"], ["bl", "b", "br"]]
+        for r in range(3):
+            for cc in range(3):
+                ttk.Button(anchor_grid, text=glyphs[r][cc], width=2,
+                           command=lambda m=modes[r][cc]: self.set_origin(m)).grid(row=r, column=cc)
 
         ttk.Separator(bar3, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
@@ -224,7 +230,7 @@ class DxfPointApp:
                               font=("Consolas", 10), bg="#12181f", fg="#9fd0a0",
                               insertbackground="#c9d1d9")
         self.header.pack(fill=tk.X, pady=(0, 4))
-        self.header.insert("1.0", "; DXF to G-code\n")
+        self.header.insert("1.0", "LAYER_COUNT:1\n;LAYER:0\n;TYPE:WALL-OUTER")
         self.header.bind("<KeyRelease>", lambda e: self._refresh_output())
 
         ttk.Label(right, text="출력 미리보기 (G01  X  Y)").pack(anchor=tk.W)
@@ -398,7 +404,8 @@ class DxfPointApp:
         n_fill = len(self.infill_paths)
         n_loops = len(find_closed_loops(outlines))
         origin_label = {"none": "원본", "center": "중심", "bl": "좌하",
-                        "tl": "좌상", "br": "우하", "tr": "우상"}.get(self.origin_mode, "원본")
+                        "tl": "좌상", "br": "우하", "tr": "우상",
+                        "l": "좌", "r": "우", "t": "상", "b": "하"}.get(self.origin_mode, "원본")
         stitch_tag = "  [결합]" if self.stitch_on.get() else ""
         msg = (f"{name}{stitch_tag}  |  외곽선 {n_out}(폐루프 {n_loops})  채우기 {n_fill}"
                f"  |  포인트 {total}"

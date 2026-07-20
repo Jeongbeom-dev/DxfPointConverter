@@ -33,6 +33,8 @@ from dxf_points import (
 
 
 # 배율(scale) 허용 범위 — 0/음수/언더플로/오버플로로 인한 렌더 폭주·크래시 방지
+APP_VERSION = "1.0.0"      # 프로그램 버전 (git 태그 v1.0.0 과 일치)
+
 SCALE_MIN = 1e-6
 SCALE_MAX = 1e7
 
@@ -66,7 +68,7 @@ def nice_step(raw):
 class DxfPointApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("DXF → G-code 변환기")
+        self.root.title(f"DXF → G-code 변환기  v{APP_VERSION}")
         self.root.geometry("1360x780")
         self.root.minsize(1160, 640)
 

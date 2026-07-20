@@ -237,11 +237,277 @@ def _lwpoly_verts(ent):
 # ---------------------------------------------------------------------------
 # 엔티티 -> 경로(포인트 리스트)
 # ---------------------------------------------------------------------------
+def _bspline_points(ctrl, knots, degree, seg_len):
+    """B-스플라인을 de Boor 알고리즘으로 샘플링해 포인트 리스트로 반환한다.
+    ctrl: [(x,y),...] 제어점, knots: 노트벡터, degree: 차수.
+    """
+    m = len(ctrl)
+    p = degree
+    if m < 2 or p < 1 or len(knots) < m + p + 1:
+        return list(ctrl)
+    u0, u1 = knots[p], knots[m]              # 유효 파라미터 구간 [u_p, u_m]
+    if u1 <= u0:
+        return list(ctrl)
+
+    def deboor(u):
+        # u 를 포함하는 노트 구간 k 찾기 (u_k <= u < u_{k+1}), 유효구간으로 클램프
+        if u >= knots[m]:
+            k = m - 1
+        elif u <= knots[p]:
+            k = p
+        else:
+            k = p
+            while k < m - 1 and not (knots[k] <= u < knots[k + 1]):
+                k += 1
+        d = [ctrl[j + k - p] for j in range(p + 1)]
+        for r in range(1, p + 1):
+            for j in range(p, r - 1, -1):
+                idx = j + k - p
+                denom = knots[idx + p - r + 1] - knots[idx]
+                a = 0.0 if abs(denom) < 1e-12 else (u - knots[idx]) / denom
+                d[j] = ((1 - a) * d[j - 1][0] + a * d[j][0],
+                        (1 - a) * d[j - 1][1] + a * d[j][1])
+        return d[p]
+
+    # 대략적 곡선 길이로 샘플 수 결정
+    approx_len = sum(math.hypot(ctrl[i + 1][0] - ctrl[i][0],
+                                ctrl[i + 1][1] - ctrl[i][1]) for i in range(m - 1))
+    n = max(p + 1, int(math.ceil(approx_len / max(seg_len, 1e-6))))
+    n = min(n, _MAX_ARC_POINTS)
+    return [deboor(u0 + (u1 - u0) * (i / n)) for i in range(n + 1)]
+
+
+def _read_hatch_spline(raw, i, n, seg_len):
+    """HATCH 스플라인 엣지(type 4)를 구조대로 읽어 (근사 포인트, 다음 인덱스) 반환.
+
+    구조: 94 degree, 73 rational, 74 periodic, 95 nknots, 96 nctrl,
+          40×nknots (노트), (10,20)×nctrl (+옵션 42×nctrl 가중치),
+          97 nfit, (11,21)×nfit (피팅점), [12/22,13/23 탄젠트].
+    근사: 피팅점 우선(곡선 위) → de Boor 평가 → 제어점 다각형.
+    """
+    def rd(code):
+        nonlocal i
+        if i < n and raw[i][0] == code:
+            v = raw[i][1]
+            i += 1
+            try:
+                return float(v)
+            except ValueError:
+                return 0.0
+        return None
+
+    degree = rd(94)
+    rd(73)
+    rd(74)
+    nknots = rd(95)
+    nctrl = rd(96)
+    degree = int(degree) if degree is not None else 3
+    nknots = int(nknots) if nknots is not None else 0
+    nctrl = int(nctrl) if nctrl is not None else 0
+
+    knots = []
+    for _k in range(nknots):
+        v = rd(40)
+        if v is None:
+            break
+        knots.append(v)
+    ctrl = []
+    for _c in range(nctrl):
+        x = rd(10)
+        y = rd(20)
+        if x is None or y is None:
+            break
+        ctrl.append((x, y))
+    while rd(42) is not None:                # 가중치 블록(있으면) 소비/무시
+        pass
+    nfit = rd(97)
+    nfit = int(nfit) if nfit is not None else 0
+    fit = []
+    for _fp in range(nfit):
+        x = rd(11)
+        y = rd(21)
+        if x is None or y is None:
+            break
+        fit.append((x, y))
+    # 탄젠트(있으면 소비)
+    rd(12); rd(22); rd(13); rd(23)
+
+    if len(fit) >= 2:
+        pts = fit                            # 피팅점은 곡선 위 → 좋은 근사
+    elif len(ctrl) >= 2 and len(knots) >= len(ctrl) + degree + 1:
+        pts = _bspline_points(ctrl, knots, degree, seg_len)
+    else:
+        pts = list(ctrl)
+    return pts, i
+
+
+def _hatch_edge_points(etype, edge, seg_len):
+    """HATCH 엣지 경계의 한 엣지를 포인트 리스트로 변환한다.
+    edge: 해당 엣지의 {group_code: [values]} 딕셔너리.
+    etype: 1=LINE, 2=ARC, 3=ELLIPSE, 4=SPLINE.
+    """
+    def g(code, idx=0, d=0.0):
+        try:
+            return float(edge[code][idx])
+        except (KeyError, IndexError, ValueError):
+            return d
+
+    if etype == 1:                                   # LINE
+        return [(g(10), g(20)), (g(11), g(21))]
+    if etype == 2:                                   # 원호 ARC
+        ccw = int(g(73, 0, 1)) != 0
+        return _arc_points(g(10), g(20), g(40), g(50), g(51), seg_len, ccw=ccw)
+    if etype == 3:                                   # 타원호 ELLIPSE
+        cx, cy = g(10), g(20)
+        mx, my = g(11), g(21)                         # 장축 끝점(중심 기준 상대)
+        ratio = g(40, 0, 1.0)                         # 단축/장축 비
+        major = math.hypot(mx, my)
+        if major < 1e-12:
+            return []
+        minor = major * ratio
+        ang = math.atan2(my, mx)
+        ca, sn = math.cos(ang), math.sin(ang)
+        sa, ea = math.radians(g(50)), math.radians(g(51))
+        ccw = int(g(73, 0, 1)) != 0
+        if ccw:
+            while ea <= sa:
+                ea += 2 * math.pi
+        else:
+            while ea >= sa:
+                ea -= 2 * math.pi
+        sweep = ea - sa
+        n = max(8, int(math.ceil((major + minor) / 2 * abs(sweep) / max(seg_len, 1e-6))))
+        n = min(n, _MAX_ARC_POINTS)
+        pts = []
+        for k in range(n + 1):
+            th = sa + sweep * (k / n)
+            ex, ey = major * math.cos(th), minor * math.sin(th)
+            pts.append((cx + ex * ca - ey * sn, cy + ex * sn + ey * ca))
+        return pts
+    if etype == 4:                                   # SPLINE (근사: 피팅점/제어점 연결)
+        xs, ys = edge.get(11, []), edge.get(21, [])  # 피팅점 우선
+        if not xs:
+            xs, ys = edge.get(10, []), edge.get(20, [])  # 없으면 제어점
+        pts = []
+        for k in range(min(len(xs), len(ys))):
+            try:
+                pts.append((float(xs[k]), float(ys[k])))
+            except ValueError:
+                pass
+        return pts
+    return []
+
+
+def _hatch_loops(ent, seg_len):
+    """HATCH 엔티티의 경계 경로(들)를 폐루프 포인트 리스트로 추출한다.
+
+    - 폴리라인 경계(92 & 2): 정점 + bulge(72 플래그) 지원.
+    - 엣지 경계: LINE/ARC/ELLIPSE 지원, SPLINE 은 근사.
+    씨드점/그라디언트 등 뒤따르는 데이터도 코드 10/20 을 쓰므로, 반드시 그룹코드
+    등장 순서(_raw)를 따라가며 경계 블록만 정확히 읽는다. (OCS/extrusion 은 표준 2D 가정)
+    """
+    raw = ent.get("_raw", [])
+    n = len(raw)
+    i = 0
+    while i < n and raw[i][0] != 91:                 # 91 = 경계 경로 수
+        i += 1
+    if i >= n:
+        return []
+
+    def fnum(v, d=0.0):
+        try:
+            return float(v)
+        except ValueError:
+            return d
+
+    try:
+        npaths = int(fnum(raw[i][1]))
+    except ValueError:
+        return []
+    i += 1
+
+    loops = []
+    for _p in range(npaths):
+        while i < n and raw[i][0] != 92:             # 92 = 경계 경로 타입 플래그
+            i += 1
+        if i >= n:
+            break
+        flag = int(fnum(raw[i][1]))
+        i += 1
+
+        if flag & 2:                                 # ---- 폴리라인 경계 ----
+            has_bulge = 0
+            closed = 0
+            nverts = 0
+            while i < n and raw[i][0] in (72, 73):
+                if raw[i][0] == 72:
+                    has_bulge = int(fnum(raw[i][1]))
+                else:
+                    closed = int(fnum(raw[i][1]))
+                i += 1
+            if i < n and raw[i][0] == 93:
+                nverts = int(fnum(raw[i][1]))
+                i += 1
+            verts = []
+            for _v in range(nverts):
+                x = y = b = 0.0
+                if i < n and raw[i][0] == 10:
+                    x = fnum(raw[i][1]); i += 1
+                if i < n and raw[i][0] == 20:
+                    y = fnum(raw[i][1]); i += 1
+                if has_bulge and i < n and raw[i][0] == 42:
+                    b = fnum(raw[i][1]); i += 1
+                verts.append((x, y, b))
+            if verts:
+                loops.append(_polyline_points(verts, bool(closed), seg_len))
+        else:                                        # ---- 엣지 경계 ----
+            nedges = 0
+            if i < n and raw[i][0] == 93:
+                nedges = int(fnum(raw[i][1]))
+                i += 1
+            pts = []
+            for _e in range(nedges):
+                while i < n and raw[i][0] != 72:
+                    if raw[i][0] in (97, 92, 98):
+                        break
+                    i += 1
+                if i >= n or raw[i][0] != 72:
+                    break
+                etype = int(fnum(raw[i][1]))
+                i += 1
+                if etype == 4:
+                    # 스플라인 엣지는 개수(95/96/97)에 따라 구조대로 소비한다.
+                    # (코드 97 이 스플라인 내부 '피팅점 수'와 경계 끝 '소스객체 수'로
+                    #  중복되므로, 개수 기반으로 읽어야 피팅점 유실/이후 엣지 누락을 막는다.)
+                    epts, i = _read_hatch_spline(raw, i, n, seg_len)
+                else:
+                    edge = {}
+                    while i < n and raw[i][0] not in (72, 93, 97, 92, 98):
+                        c, v = raw[i]
+                        edge.setdefault(c, []).append(v)
+                        i += 1
+                    epts = _hatch_edge_points(etype, edge, seg_len)
+                if epts:
+                    if pts and math.hypot(pts[-1][0] - epts[0][0],
+                                          pts[-1][1] - epts[0][1]) < 1e-9:
+                        pts.extend(epts[1:])
+                    else:
+                        pts.extend(epts)
+            if len(pts) >= 2:
+                if not is_closed(pts):
+                    pts.append(pts[0])
+                loops.append(pts)
+    return loops
+
+
 def _entity_paths(ent, seg_len):
     t = ent["type"]
 
     if t == "LINE":
         return [[(_f(ent, 10), _f(ent, 20)), (_f(ent, 11), _f(ent, 21))]]
+
+    if t == "HATCH":
+        return _hatch_loops(ent, seg_len)
 
     if t == "POINT":
         return [[(_f(ent, 10), _f(ent, 20))]]

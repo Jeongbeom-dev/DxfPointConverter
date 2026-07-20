@@ -70,7 +70,7 @@ AutoCAD에서 도형을 **여러 개의 개별 LINE/호로 그린 경우**(예: 
 - 상태바에 `[결합] 외곽선 N(폐루프 M)`으로 결과가 표시됩니다.
 - 채우기 시 닫힌 면이 없고 결합으로 해결 가능하면 안내가 뜹니다.
 
-> 참고: AutoCAD `HATCH`(해치/채우기) 엔티티 자체는 아직 미지원이며, 경계를 이루는 LINE/폴리라인을 결합해 사용합니다.
+> 참고: AutoCAD `HATCH`(해치/채우기) 엔티티는 **경계 경로를 직접 추출**합니다(폴리라인·LINE·ARC·ELLIPSE 경계, 구멍 포함; SPLINE 경계는 근사). 따라서 해치가 있는 도형은 결합 없이도 폐루프로 인식되어 채우기가 됩니다. 경계가 개별 선분으로만 그려진 경우엔 `선분 결합`을 사용하세요.
 
 ## 면채우기 (슬라이스 / infill)
 
@@ -97,7 +97,7 @@ AutoCAD에서 도형을 **여러 개의 개별 LINE/호로 그린 경우**(예: 
 
 ## 지원 DXF 엔티티
 
-LINE, LWPOLYLINE(bulge 원호 포함), POLYLINE, CIRCLE, ARC, POINT
+LINE, LWPOLYLINE(bulge 원호 포함), POLYLINE, CIRCLE, ARC, POINT, HATCH(경계 경로 추출)
 
 ## 파일 구성
 

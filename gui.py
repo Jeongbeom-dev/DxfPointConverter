@@ -33,7 +33,7 @@ from dxf_points import (
 
 
 # 배율(scale) 허용 범위 — 0/음수/언더플로/오버플로로 인한 렌더 폭주·크래시 방지
-APP_VERSION = "1.2.0"      # 프로그램 버전 (git 태그와 일치)
+APP_VERSION = "1.3.0"      # 프로그램 버전 (git 태그와 일치)
 
 SCALE_MIN = 1e-6
 SCALE_MAX = 1e7

@@ -550,6 +550,57 @@ def generate_infill(loops, spacing, angle_deg=0.0, zigzag=False):
     return [[inv(px, py) for (px, py) in stroke] for stroke in strokes]
 
 
+def order_paths(items, start=(0.0, 0.0), close_tol=1e-6, max_items=4000):
+    """경로들을 펜업(점프) 이동이 최소가 되도록 재정렬/방향조정한다 (그리디 최근접).
+
+    items : [(points, tag), ...]  — tag(예: 'outline'/'infill')는 그대로 따라간다.
+    start : 시작 펜 위치(월드 좌표).
+    반환  : 재정렬된 [(points, tag), ...].
+            - 열린 경로: 현재 펜에 가까운 끝이 시작이 되도록 필요시 역방향.
+            - 닫힌 경로: 현재 펜에 가장 가까운 정점에서 시작하도록 회전(끝=시작 유지).
+    항목 수가 max_items 초과면 성능 보호를 위해 원본 순서를 그대로 반환한다.
+    """
+    n = len(items)
+    if n <= 1 or n > max_items:
+        return list(items)
+
+    def d(a, b):
+        return math.hypot(a[0] - b[0], a[1] - b[1])
+
+    prepared = [(pts, tag, is_closed(pts, close_tol) and len(pts) >= 4)
+                for pts, tag in items]
+
+    used = [False] * n
+    cur = start
+    result = []
+    for _ in range(n):
+        best_j = -1
+        best_cost = None
+        best_seq = None
+        for j in range(n):
+            if used[j]:
+                continue
+            pts, tag, closed = prepared[j]
+            if closed:
+                uniq = pts[:-1]                    # 마지막(=처음) 중복 제거
+                ci = min(range(len(uniq)), key=lambda k: d(uniq[k], cur))
+                cost = d(uniq[ci], cur)
+                seq = uniq[ci:] + uniq[:ci] + [uniq[ci]]   # 회전 후 닫기
+            else:
+                d0 = d(pts[0], cur)
+                d1 = d(pts[-1], cur)
+                if d1 < d0:
+                    cost, seq = d1, list(reversed(pts))
+                else:
+                    cost, seq = d0, list(pts)
+            if best_cost is None or cost < best_cost:
+                best_cost, best_j, best_seq = cost, j, seq
+        used[best_j] = True
+        result.append((best_seq, prepared[best_j][1]))
+        cur = best_seq[-1]
+    return result
+
+
 def paths_to_point_text(paths, precision=3, blank_between=True):
     """
     경로 리스트를 X Y 포인트 텍스트로 변환 (G 명령어 없음).
@@ -575,7 +626,7 @@ def paths_to_gcode_text(paths, precision=3, blank_between=True):
         if blank_between and pi > 0:
             lines.append("")  # 경로 구분 (펜 업)
         for (x, y) in pts:
-            lines.append(f"G01\tX{x:.{precision}f}\tY{y:.{precision}f}")
+            lines.append(f"G1\tX{x:.{precision}f}\tY{y:.{precision}f}")
     return "\n".join(lines) + "\n"
 
 

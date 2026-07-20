@@ -28,12 +28,12 @@ from tkinter import ttk, filedialog, messagebox
 from dxf_points import (
     dxf_to_paths_ex, paths_to_gcode_text,
     find_closed_loops, generate_infill, anchor_point, offset_paths, bounds,
-    stitch_paths,
+    stitch_paths, order_paths,
 )
 
 
 # 배율(scale) 허용 범위 — 0/음수/언더플로/오버플로로 인한 렌더 폭주·크래시 방지
-APP_VERSION = "1.0.0"      # 프로그램 버전 (git 태그 v1.0.0 과 일치)
+APP_VERSION = "1.1.0"      # 프로그램 버전 (git 태그와 일치)
 
 SCALE_MIN = 1e-6
 SCALE_MAX = 1e7
@@ -45,6 +45,7 @@ GRID_MAJOR = "#2a323c"
 AXIS = "#3a4654"
 TRAVEL = "#5a6472"       # 펜업(이동) 점선 색
 INFILL = "#7d8ea8"       # 면채우기(슬라이스) 선 색
+CURSOR = "#ffd54f"       # 재생 중 현재 지점 강조 마커 색
 ORIGIN = "#e06c75"
 START_MARK = "#ffffff"
 PALETTE = ["#4fc3f7", "#81c784", "#ffb74d", "#e57373",
@@ -105,13 +106,17 @@ class DxfPointApp:
         self.fill_angle = tk.StringVar(value="0")
         self.fill_zigzag = tk.BooleanVar(value=True)
         self.stitch_on = tk.BooleanVar(value=False)   # 선분 결합(끝점 이어 폐루프화)
+        self.optimize_order = tk.BooleanVar(value=True)  # 한붓 최적화(점프 최소화)
 
         # 애니메이션 상태
         self._anim_job = None
         self._anim_reveal = 0      # 표시할 세그먼트 수
+        self._anim_accum = 0.0     # 소수 속도 누적(1 이하 속도 지원)
+        self._animating = False    # 재생 중 여부 (강조 마커 표시용)
         self._segments = []        # [(kind, x1,y1,x2,y2)] kind: 'cut'|'travel'
         self._verts = []           # [(x,y,is_start,path_idx)]  순서대로
-        self.anim_speed = tk.IntVar(value=20)   # 프레임당 세그먼트 수
+        self.anim_speed = tk.DoubleVar(value=5.0)      # 프레임당 세그먼트 수(0.1~15)
+        self.anim_speed_txt = tk.StringVar(value="5.0")
 
         self._pan_start = None
         self._redraw_job = None    # 상호작용 중 redraw 코얼레싱용 after_idle 핸들
@@ -153,10 +158,10 @@ class DxfPointApp:
         ttk.Button(bar1, text="▶ 재생", command=self.anim_play).pack(side=tk.LEFT)
         ttk.Button(bar1, text="■ 정지", command=self.anim_stop).pack(side=tk.LEFT, padx=2)
         ttk.Label(bar1, text=" 속도:").pack(side=tk.LEFT)
-        ttk.Scale(bar1, from_=1, to=200, orient=tk.HORIZONTAL, length=90,
+        ttk.Scale(bar1, from_=0.1, to=15, orient=tk.HORIZONTAL, length=90,
                   variable=self.anim_speed,
-                  command=lambda v: self.anim_speed.set(int(float(v)))).pack(side=tk.LEFT)
-        ttk.Label(bar1, textvariable=self.anim_speed, width=4,
+                  command=lambda v: self.anim_speed_txt.set(f"{float(v):.1f}")).pack(side=tk.LEFT)
+        ttk.Label(bar1, textvariable=self.anim_speed_txt, width=4,
                   anchor=tk.W).pack(side=tk.LEFT)
 
         ttk.Button(bar1, text="💾 저장(.gcode)", command=self.save_points).pack(side=tk.RIGHT)
@@ -186,6 +191,8 @@ class DxfPointApp:
 
         ttk.Checkbutton(bar3, text="선분 결합(폐루프화)", variable=self.stitch_on,
                         command=self._on_stitch_toggle).pack(side=tk.LEFT)
+        ttk.Checkbutton(bar3, text="한붓 최적화", variable=self.optimize_order,
+                        command=self._rebuild).pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Separator(bar3, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
@@ -365,14 +372,15 @@ class DxfPointApp:
         # 기준점(월드 좌표) = 오브젝트 경계 기준 앵커 (채우기 제외)
         self.origin = anchor_point(outlines, self.origin_mode)
 
-        combined = []
-        kinds = []
-        for pts in outlines:
-            combined.append(pts)
-            kinds.append("outline")
-        for pts in self.infill_paths:
-            combined.append(pts)
-            kinds.append("infill")
+        # 외곽선 + 채우기를 하나의 목록으로 (태그 유지)
+        items = [(pts, "outline") for pts in outlines]
+        items += [(pts, "infill") for pts in self.infill_paths]
+        # 한붓 최적화: 펜업(점프) 최소가 되도록 재정렬/방향조정
+        if self.optimize_order.get() and len(items) > 1:
+            items = order_paths(items, start=self.origin)
+
+        combined = [pts for pts, _tag in items]
+        kinds = [tag for _pts, tag in items]
 
         self.paths = offset_paths(combined, self.origin)
         self.path_kinds = kinds
@@ -589,12 +597,15 @@ class DxfPointApp:
             return
         self.anim_stop()
         self._anim_reveal = 0
+        self._anim_accum = 0.0
+        self._animating = True
         self._anim_step()
 
     def anim_stop(self):
         if self._anim_job is not None:
             self.root.after_cancel(self._anim_job)
             self._anim_job = None
+        self._animating = False
         # 정지 시 전체 표시
         self._anim_reveal = len(self._segments)
         self.redraw()
@@ -611,13 +622,19 @@ class DxfPointApp:
 
     def _anim_step(self):
         limit = self._anim_limit()
-        step = max(1, int(self.anim_speed.get()))
-        self._anim_reveal = min(limit, self._anim_reveal + step)
+        speed = max(0.1, float(self.anim_speed.get()))   # 0.1~15, 1 이하 지원
+        self._anim_accum += speed
+        add = int(self._anim_accum)                       # 소수 누적: <1 이면 여러 프레임에 1칸
+        if add:
+            self._anim_accum -= add
+            self._anim_reveal = min(limit, self._anim_reveal + add)
         self.redraw()
         if self._anim_reveal < limit:
             self._anim_job = self.root.after(30, self._anim_step)
         else:
             self._anim_job = None
+            self._animating = False
+            self.redraw()                                # 마지막 강조 마커 정리
 
     # ------------------------------------------------------------- 그리기
     def redraw(self):
@@ -664,6 +681,10 @@ class DxfPointApp:
         if self.show_points.get() or self.show_start.get():
             self._draw_vertices(reveal)
 
+        # 재생 중: 현재 그리는 지점을 따라가는 강조 마커
+        if self._animating:
+            self._draw_cursor(reveal)
+
         # 원점 표시
         self._draw_origin(cw, ch)
 
@@ -707,6 +728,22 @@ class DxfPointApp:
             if show_pt:
                 c.create_oval(sx - 1.5, sy - 1.5, sx + 1.5, sy + 1.5,
                               fill=color, outline="")
+
+    def _draw_cursor(self, reveal):
+        """재생 중 현재 그리는 지점을 강조하는 마커(링+점+십자)를 그린다."""
+        if not self._verts:
+            return
+        idx = min(reveal, len(self._verts) - 1)
+        x, y, _is_start, _pi = self._verts[idx]
+        sx, sy = self.w2s(x, y)
+        c = self.canvas
+        r = 9
+        c.create_oval(sx - r, sy - r, sx + r, sy + r, outline=CURSOR, width=2)
+        c.create_line(sx - r - 4, sy, sx - r + 2, sy, fill=CURSOR, width=1)
+        c.create_line(sx + r - 2, sy, sx + r + 4, sy, fill=CURSOR, width=1)
+        c.create_line(sx, sy - r - 4, sx, sy - r + 2, fill=CURSOR, width=1)
+        c.create_line(sx, sy + r - 2, sx, sy + r + 4, fill=CURSOR, width=1)
+        c.create_oval(sx - 2.5, sy - 2.5, sx + 2.5, sy + 2.5, fill=CURSOR, outline="")
 
     def _draw_grid(self, cw, ch):
         c = self.canvas

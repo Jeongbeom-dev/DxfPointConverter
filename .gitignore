@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# PyInstaller 빌드 산출물 (build.bat 로 재생성 가능)
+build/
+dist/
+*.spec
+
+# 출력 결과물
+output/*.gcode
+output/*.txt
+
+# 에디터/OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
